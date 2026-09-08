@@ -70,9 +70,10 @@ docker run --rm -it \
   -v "$(pwd)/proxies.txt:/data/input_proxy:ro" \
   ghcr.io/salingnh/checkproxy:latest \
   -i /data/input_proxy \
-  -c 20 \
-  --sort speed
+  -c 20
 ```
+
+*(Tùy chọn: Thêm `--sort speed` hoặc `--sort latency` nếu muốn sắp xếp kết quả).*
 
 ### 2.3. Ví dụ đo tốc độ sâu (tải file mẫu lớn hơn)
 
@@ -119,8 +120,7 @@ docker run --rm -it \
   -v "$(pwd)/proxies.txt:/data/input_proxy:ro" \
   checkproxy:latest \
   -i /data/input_proxy \
-  -c 10 \
-  --sort speed
+  -c 10
 ```
 
 ---
@@ -131,23 +131,23 @@ Nhờ thư viện `rich`, công cụ cung cấp giao diện cập nhật thời 
 
 ### 4.1. Giao diện trực tiếp khi đang quét (Live Terminal)
 
-Bao gồm 3 khu vực: Bảng top proxy đã kiểm tra thành công, bảng tiến trình tải về của các proxy đang chạy đồng thời (với thanh % tiến độ và tốc độ MB/s tức thời), cùng thanh trạng thái tổng:
+Bao gồm 3 khu vực: Bảng top proxy đã kiểm tra thành công, bảng tiến trình tải về của các proxy đang chạy đồng thời (với cột Public IP, thanh % tiến độ và tốc độ MB/s tức thời), cùng thanh trạng thái tổng:
 
 ```text
-┌─────────────────────────── 🏆 TOP PROXIES HOẠT ĐỘNG (Sắp xếp theo SPEED) ───────────────────────────┐
-│ #    Proxy                                       Latency            Speed             Out IP        │
-│ 1    http://user:***@103.152.118.23:8080         115 ms             4.25 MB/s         103.152.118.23│
-│ 2    socks5://proxyuser:***@45.76.182.90:1080    180 ms             2.40 MB/s         45.76.182.90  │
-│ 3    http://116.202.12.34:3128                   320 ms             1.15 MB/s         116.202.12.34 │
-│ 4    socks4://194.67.210.15:1080                 450 ms             0.85 MB/s         194.67.210.15 │
-└─────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────── 🏆 TOP PROXIES HOẠT ĐỘNG ──────────────────────────────────────────┐
+│ #    Proxy                                       Public IP          Latency            Speed                 │
+│ 1    http://user:***@103.152.118.23:8080         103.152.118.23     115 ms             4.25 MB/s             │
+│ 2    socks5://proxyuser:***@45.76.182.90:1080    45.76.182.90       180 ms             2.40 MB/s             │
+│ 3    http://116.202.12.34:3128                   116.202.12.34      320 ms             1.15 MB/s             │
+│ 4    socks4://194.67.210.15:1080                 194.67.210.15      450 ms             0.85 MB/s             │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────── ⚡ TIẾN TRÌNH CHECK ĐỒNG THỜI (Active: 4) ──────────────────────────────┐
-│ Proxy Đang Check                     Trạng thái        Tiến độ Download                     Tốc độ  │
-│ http://user:***@14.225.20.10:8080    Downloading       ━━━━━━━───────  52.4% (1.05 MB/2.00 MB) 2.15 MB/s│
-│ socks5://188.166.220.1:1080          Downloading       ━━━━━━━━━━━━━━ 100.0% (2.00 MB/2.00 MB) 3.10 MB/s│
-│ http://45.118.144.2:3128             Ping...           đang đo latency                           -  │
-│ socks4://103.10.12.5:1080            Đang chờ          --                                        -  │
+│ Proxy Đang Check                     Public IP        Trạng thái    Tiến độ Download        Tốc độ  │
+│ http://user:***@14.225.20.10:8080    14.225.20.10     Downloading   ━━━━━━━  52.4% (1.05MB) 2.15 MB/s│
+│ socks5://188.166.220.1:1080          188.166.220.1    Downloading   ━━━━━━━ 100.0% (2.00MB) 3.10 MB/s│
+│ http://45.118.144.2:3128             Đang lấy...      Ping...       đang đo latency              -  │
+│ socks4://103.10.12.5:1080            -                Đang chờ      --                           -  │
 └─────────────────────────────────────────────────────────────────────────────────────────────────────┘
 
 ╭─────────────────────────────────────────────────────────────────────────────────────────────────────╮
@@ -157,29 +157,29 @@ Bao gồm 3 khu vực: Bảng top proxy đã kiểm tra thành công, bảng ti�
 
 ### 4.2. Bảng kết quả tổng kết cuối cùng
 
-Khi hoàn tất, bảng tổng kết sẽ được in lưu lại trên terminal với đầy đủ số liệu đo đạc chi tiết và danh sách các proxy chết kèm nguyên nhân lỗi (timeout, từ chối kết nối, sai thông tin đăng nhập 407...):
+Khi hoàn tất, bảng tổng kết sẽ được in lưu lại trên terminal với đầy đủ số liệu đo đạc chi tiết (cột **Public IP** đặt ngay sau cột **Proxy** đồng bộ ở cả bảng ALIVE và bảng DEAD):
 
 ```text
 Tổng kết: ALIVE: 14 | DEAD: 6 | TOTAL: 20
 
-=== TOP ALIVE PROXIES (Sắp xếp theo SPEED) ===
-┏━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┓
-┃ # ┃ Proxy                                   ┃    Latency ┃        Speed ┃         Out IP ┃
-┡━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━┩
-│ 1 │ http://user:***@103.152.118.23:8080     │     115 ms │    4.25 MB/s │ 103.152.118.23 │
-│ 2 │ socks5://proxyuser:***@45.76.182.90:1080│     180 ms │    2.40 MB/s │   45.76.182.90 │
-│ 3 │ http://116.202.12.34:3128               │     320 ms │    1.15 MB/s │  116.202.12.34 │
-│ 4 │ socks4://194.67.210.15:1080             │     450 ms │    0.85 MB/s │  194.67.210.15 │
-└───┴─────────────────────────────────────────┴────────────┴──────────────┴────────────────┘
+=== TOP ALIVE PROXIES ===
+┏━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┓
+┃ # ┃ Proxy                                   ┃        Public IP ┃    Latency ┃               Speed ┃
+┡━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━┩
+│ 1 │ http://user:***@103.152.118.23:8080     │   103.152.118.23 │     115 ms │           4.25 MB/s │
+│ 2 │ socks5://proxyuser:***@45.76.182.90:1080│     45.76.182.90 │     180 ms │           2.40 MB/s │
+│ 3 │ http://116.202.12.34:3128               │    116.202.12.34 │     320 ms │           1.15 MB/s │
+│ 4 │ socks4://194.67.210.15:1080             │    194.67.210.15 │     450 ms │ Lỗi tải(ReadTimeout)│
+└───┴─────────────────────────────────────────┴──────────────────┴────────────┴─────────────────────┘
 
 === DEAD PROXIES (Mẫu 30 cái) ===
-┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ Proxy                                       ┃ Lỗi / Status                               ┃
-┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-│ http://103.21.244.2:80                      │ ConnectTimeout                             │
-│ socks5://192.241.160.1:1080                 │ ProxyError: Connection refused             │
-│ http://user:***@45.32.11.22:8080            │ HTTPStatusError: 407                       │
-└───┴─────────────────────────────────────────┴────────────────────────────────────────────┘
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Proxy                                       ┃        Public IP ┃ Lỗi / Status                   ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ http://103.21.244.2:80                      │                - │ ConnectTimeout (Check IP)      │
+│ socks5://192.241.160.1:1080                 │                - │ ProxyError: Connection refused │
+│ http://user:***@45.32.11.22:8080            │     45.32.11.22  │ HTTP 407                       │
+└───┴─────────────────────────────────────────┴──────────────────┴────────────────────────────────┘
 ```
 
 ---
@@ -188,18 +188,18 @@ Tổng kết: ALIVE: 14 | DEAD: 6 | TOTAL: 20
 
 Các tham số có thể truyền trực tiếp vào lệnh chạy để tùy biến hành vi:
 
-| Tham số               | Viết tắt |                      Mặc định                      |  Bắt buộc  | Chi tiết                                                                                                                                                                  |
-| :--------------------- | :--------: | :---------------------------------------------------: | :-----------: | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--input`            |   `-i`   |                    *Không có*                    | **Có** | Đường dẫn đến file danh sách proxy bên trong container (ví dụ:`/data/input_proxy`).                                                                            |
-| `--concurrency`      |   `-c`   |                        `10`                        |    Không    | Số lượng worker kiểm tra đồng thời. Tăng lên 20-50 nếu danh sách proxy nhiều.                                                                                  |
-| `--sort`             |            |                       `speed`                       |    Không    | Tiêu chí sắp xếp bảng kết quả:• `speed`: Ưu tiên tốc độ tải về cao nhất xuống thấp. • `latency`: Ưu tiên ping/độ trễ thấp nhất lên trước. |
-| `--speed-bytes`      |            |                      `2000000`                      |    Không    | Dung lượng byte tải về để đo tốc độ (mặc định 2MB). Giảm xuống để check nhanh hơn hoặc tăng lên để đo kỹ hơn.                                    |
-| `--connect-timeout`  |            |                        `3.0`                        |    Không    | Timeout kết nối TCP ban đầu tới proxy (tính bằng giây).                                                                                                            |
-| `--timeout`          |            |                       `15.0`                       |    Không    | Tổng thời gian timeout tối đa cho toàn bộ chu trình kiểm tra một proxy (tính bằng giây).                                                                       |
-| `--check-url`        |            |              `https://ifconfig.io/ip`              |    Không    | URL dùng để kiểm tra proxy còn sống (alive) và lấy Outbound IP của proxy.                                                                                         |
-| `--speed-url`        |            | `https://speed.cloudflare.com/__down?bytes={bytes}` |    Không    | URL dùng để tải dữ liệu đo tốc độ. Tự động thay thế placeholder`{bytes}`.                                                                                  |
-| `--mask-password`    |            |                       `True`                       |    Không    | Ẩn mật khẩu proxy khi hiển thị (`user:***@host:port`). Có thể truyền `true`/`false`.                                                                         |
-| `--no-mask-password` |            |                                                      |    Không    | Hiển thị mật khẩu proxy đầy đủ trên màn hình, không che.                                                                                                       |
+| Tham số               | Viết tắt |                      Mặc định                      |  Bắt buộc  | Chi tiết                                                                                                                                                                 |
+| :--------------------- | :--------: | :---------------------------------------------------: | :-----------: | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--input`            |   `-i`   |                    *Không có*                    | **Có** | Đường dẫn đến file danh sách proxy bên trong container (ví dụ:`/data/input_proxy`).                                                                           |
+| `--concurrency`      |   `-c`   |                        `10`                        |    Không    | Số lượng worker kiểm tra đồng thời. Tăng lên 20-50 nếu danh sách proxy nhiều.                                                                                 |
+| `--sort`             |            |                       `none`                        |    Không    | Tiêu chí sắp xếp bảng kết quả (mặc định không sắp xếp): <br>• `none`: Giữ nguyên thứ tự kết quả trả về.<br>• `speed`: Ưu tiên tốc độ tải cao xuống thấp.<br>• `latency`: Ưu tiên ping thấp lên trước. |
+| `--speed-bytes`      |            |                      `2000000`                      |    Không    | Dung lượng byte tải về để đo tốc độ (mặc định 2MB). Giảm xuống để check nhanh hơn hoặc tăng lên để đo kỹ hơn.                                   |
+| `--connect-timeout`  |            |                        `3.0`                        |    Không    | Timeout kết nối TCP ban đầu tới proxy (tính bằng giây).                                                                                                           |
+| `--timeout`          |            |                       `15.0`                       |    Không    | Tổng thời gian timeout tối đa cho toàn bộ chu trình kiểm tra một proxy (tính bằng giây).                                                                      |
+| `--check-url`        |            |              `https://ifconfig.io/ip`              |    Không    | URL dùng để kiểm tra proxy còn sống (alive) và lấy Outbound IP của proxy.                                                                                        |
+| `--speed-url`        |            | `https://speed.cloudflare.com/__down?bytes={bytes}` |    Không    | URL dùng để tải dữ liệu đo tốc độ. Tự động thay thế placeholder`{bytes}`.                                                                                 |
+| `--mask-password`    |            |                       `True`                       |    Không    | Ẩn mật khẩu proxy khi hiển thị (`user:***@host:port`). Có thể truyền `true`/`false`.                                                                        |
+| `--no-mask-password` |            |                                                      |    Không    | Hiển thị mật khẩu proxy đầy đủ trên màn hình, không che.                                                                                                      |
 
 ---
 

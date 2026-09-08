@@ -8,4 +8,4 @@ RUN pip install --no-cache-dir --default-timeout=100 -r requirements.txt
 COPY . .
 
 ENTRYPOINT ["python", "check_proxy.py"]
-CMD ["-i", "input_proxy", "-c", "10", "--sort", "speed"]
+CMD ["-i", "input_proxy", "-c", "10"]

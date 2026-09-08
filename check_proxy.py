@@ -44,6 +44,7 @@ class ProxyResult:
     status_code: Optional[int] = None
     latency_ms: Optional[float] = None
     download_mb_s: Optional[float] = None
+    download_error: Optional[str] = None
     out_ip: Optional[str] = None
     error: Optional[str] = None
 
@@ -52,6 +53,7 @@ class ProxyResult:
 class ActiveTaskInfo:
     proxy: str
     phase: str = "Đang chờ"  # "Đang chờ" | "Kiểm tra Ping" | "Đang tải speed"
+    out_ip: Optional[str] = None
     downloaded: int = 0
     total_bytes: int = 0
     speed_mb_s: float = 0.0
@@ -59,7 +61,7 @@ class ActiveTaskInfo:
 
 
 class CheckerState:
-    def __init__(self, total: int, sort_by: str = "latency", mask_password: bool = True):
+    def __init__(self, total: int, sort_by: str = "none", mask_password: bool = True):
         self.total = total
         self.sort_by = sort_by
         self.mask_password = mask_password
@@ -109,6 +111,17 @@ def normalize_proxy(p: str) -> str:
     return p.strip()
 
 
+def format_speed(download_mb_s: Optional[float], download_error: Optional[str] = None) -> str:
+    if download_mb_s is not None:
+        if download_error:
+            return f"{download_mb_s:.2f} MB/s [yellow]*[/yellow]"
+        return f"{download_mb_s:.2f} MB/s"
+    elif download_error:
+        return f"[yellow]{download_error}[/yellow]"
+    else:
+        return "NA"
+
+
 def format_bytes(b: int) -> str:
     if b < 1024:
         return f"{b} B"
@@ -139,7 +152,12 @@ async def measure_latency(
 
     out_ip = None
     try:
-        out_ip = r.content.strip().decode("utf-8")
+        raw_text = r.content.strip().decode("utf-8", errors="ignore")
+        ip_match = re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}\b|[a-fA-F0-9:]{7,}", raw_text)
+        if ip_match:
+            out_ip = ip_match.group(0)
+        else:
+            out_ip = raw_text.splitlines()[0][:30] if raw_text else None
     except Exception:
         pass
 
@@ -152,9 +170,10 @@ async def measure_download_speed(
     timeout_s: float,
     max_bytes: int,
     active_info: Optional[ActiveTaskInfo] = None,
-) -> Optional[float]:
+) -> Tuple[Optional[float], Optional[str]]:
     """
     Stream download up to max_bytes, live update % and MB/s.
+    Returns: (download_mb_s, download_error)
     """
     downloaded = 0
     t0 = time.perf_counter()
@@ -165,6 +184,7 @@ async def measure_download_speed(
         active_info.downloaded = 0
         active_info.speed_mb_s = 0.0
 
+    err_msg = None
     try:
         async with client.stream("GET", url, timeout=timeout_s) as r:
             r.raise_for_status()
@@ -185,20 +205,20 @@ async def measure_download_speed(
 
                 if downloaded >= max_bytes:
                     break
-    except Exception:
-        # Nếu bị timeout hoặc ngắt kết nối giữa chừng nhưng đã tải được dữ liệu,
-        # vẫn tính tốc độ dựa trên lượng byte thực tế đã tải trước khi timeout
-        dt = time.perf_counter() - t0
-        if dt > 0 and downloaded > 0:
-            return (downloaded / (1024 * 1024)) / dt
-        return None
+    except httpx.ReadTimeout:
+        err_msg = "ReadTimeout"
+    except httpx.ConnectTimeout:
+        err_msg = "ConnectTimeout"
+    except httpx.HTTPStatusError as e:
+        err_msg = f"HTTP {e.response.status_code}"
+    except Exception as e:
+        err_msg = type(e).__name__
 
     dt = time.perf_counter() - t0
-    if dt <= 0 or downloaded <= 0:
-        return None
-
-    mb = downloaded / (1024 * 1024)
-    return mb / dt  # MB/s
+    if dt > 0 and downloaded > 0:
+        mb = downloaded / (1024 * 1024)
+        return (mb / dt), err_msg
+    return None, err_msg
 
 
 async def test_one_proxy(
@@ -235,6 +255,7 @@ async def test_one_proxy(
 
             if active_info:
                 active_info.latency_ms = latency_ms
+                active_info.out_ip = out_ip
 
             if 200 <= status < 300:
                 res.alive = True
@@ -245,7 +266,7 @@ async def test_one_proxy(
                     except (KeyError, ValueError):
                         url_for_speed = speed_url
 
-                sp = await measure_download_speed(
+                sp, dl_err = await measure_download_speed(
                     client,
                     url_for_speed,
                     total_timeout_s,
@@ -253,16 +274,18 @@ async def test_one_proxy(
                     active_info=active_info,
                 )
                 res.download_mb_s = sp
+                res.download_error = dl_err
             else:
                 res.alive = False
+                res.error = f"HTTP {status}"
     except httpx.ProxyError as e:
         res.error = f"ProxyError: {e}"
     except httpx.ConnectTimeout:
-        res.error = "ConnectTimeout"
+        res.error = "ConnectTimeout (Check IP)"
     except httpx.ReadTimeout:
-        res.error = "ReadTimeout"
+        res.error = "ReadTimeout (Check IP)"
     except httpx.HTTPStatusError as e:
-        res.error = f"HTTPStatusError: {e.response.status_code}"
+        res.error = f"HTTP {e.response.status_code}"
         res.status_code = getattr(e.response, "status_code", None)
     except Exception as e:
         res.error = f"{type(e).__name__}: {e}"
@@ -285,7 +308,7 @@ def load_proxies(path: str) -> List[str]:
     return out
 
 
-def sort_alive_proxies(proxies: List[ProxyResult], sort_by: str = "latency") -> List[ProxyResult]:
+def sort_alive_proxies(proxies: List[ProxyResult], sort_by: str = "none") -> List[ProxyResult]:
     """Sort danh sách proxy theo điều kiện"""
     if sort_by == "speed":
         return sorted(
@@ -296,7 +319,7 @@ def sort_alive_proxies(proxies: List[ProxyResult], sort_by: str = "latency") -> 
                 x.latency_ms or 1e18,
             ),
         )
-    else:
+    elif sort_by == "latency":
         return sorted(
             proxies,
             key=lambda x: (
@@ -305,6 +328,8 @@ def sort_alive_proxies(proxies: List[ProxyResult], sort_by: str = "latency") -> 
                 -(x.download_mb_s or 0.0),
             ),
         )
+    else:
+        return list(proxies)
 
 
 def make_render_group(state: CheckerState) -> Group:
@@ -313,22 +338,23 @@ def make_render_group(state: CheckerState) -> Group:
     alive_completed = [r for r in state.completed if r.alive]
     sorted_alive = sort_alive_proxies(alive_completed, sort_by=state.sort_by)
 
+    sort_title = f" (Sắp xếp theo {state.sort_by.upper()})" if state.sort_by and state.sort_by != "none" else ""
     top_table = Table(
-        title=f"🏆 [bold green]TOP PROXIES HOẠT ĐỘNG (Sắp xếp theo {state.sort_by.upper()})[/bold green]",
+        title=f"🏆 [bold green]TOP PROXIES HOẠT ĐỘNG{sort_title}[/bold green]",
         expand=True,
     )
     top_table.add_column("#", justify="right", style="dim", width=4)
     top_table.add_column("Proxy", style="cyan", no_wrap=True)
+    top_table.add_column("Public IP", style="yellow", width=18)
     top_table.add_column("Latency", justify="right", style="magenta", width=12)
-    top_table.add_column("Speed", justify="right", style="bold green", width=14)
-    top_table.add_column("Out IP", style="yellow", width=18)
+    top_table.add_column("Speed", justify="right", style="bold green", width=16)
 
     if sorted_alive:
         for idx, r in enumerate(sorted_alive[:10], 1):
             lat = f"{r.latency_ms:.0f} ms" if r.latency_ms is not None else "NA"
-            spd = f"{r.download_mb_s:.2f} MB/s" if r.download_mb_s is not None else "NA"
+            spd = format_speed(r.download_mb_s, r.download_error)
             proxy_display = mask_proxy(r.proxy, state.mask_password)
-            top_table.add_row(str(idx), proxy_display, lat, spd, r.out_ip or "NA")
+            top_table.add_row(str(idx), proxy_display, r.out_ip or "NA", lat, spd)
     else:
         top_table.add_row("-", "[dim]Đang kiểm tra, chưa có proxy ALIVE...[/dim]", "-", "-", "-")
 
@@ -338,13 +364,15 @@ def make_render_group(state: CheckerState) -> Group:
         expand=True,
     )
     active_table.add_column("Proxy Đang Check", style="blue", no_wrap=True)
+    active_table.add_column("Public IP", style="yellow", width=18)
     active_table.add_column("Trạng thái", width=16)
-    active_table.add_column("Tiến độ Download", width=36)
+    active_table.add_column("Tiến độ Download", width=34)
     active_table.add_column("Tốc độ", justify="right", style="bold green", width=14)
 
     active_items = list(state.active_tasks.values())
     if active_items:
         for info in active_items[:8]:
+            ip_display = info.out_ip or "[dim]Đang lấy...[/dim]"
             if info.phase == "Đang tải speed":
                 status = "[bold cyan]Downloading[/bold cyan]"
                 prog_bar = format_progress_bar(info.downloaded, info.total_bytes, width=12)
@@ -358,16 +386,17 @@ def make_render_group(state: CheckerState) -> Group:
                 status = "[dim]Đang chờ[/dim]"
                 prog_text = "[dim]--[/dim]"
                 speed_text = "[dim]-[/dim]"
+                ip_display = "[dim]-[/dim]"
 
             proxy_display = mask_proxy(info.proxy, state.mask_password)
-            active_table.add_row(proxy_display, status, prog_text, speed_text)
+            active_table.add_row(proxy_display, ip_display, status, prog_text, speed_text)
 
         if len(active_items) > 8:
             active_table.add_row(
-                f"[dim]+ {len(active_items) - 8} proxy khác...[/dim]", "", "", ""
+                f"[dim]+ {len(active_items) - 8} proxy khác...[/dim]", "", "", "", ""
             )
     else:
-        active_table.add_row("[dim]Không có worker đang chạy[/dim]", "-", "-", "-")
+        active_table.add_row("[dim]Không có worker đang chạy[/dim]", "-", "-", "-", "-")
 
     # 3. THANH TRẠNG THÁI TIẾN ĐỘ TỔNG
     bar_overall = format_progress_bar(len(state.completed), state.total, width=20)
@@ -398,21 +427,22 @@ def print_results(results: List[ProxyResult], sort_by: str = "latency", mask_pas
     console.print()
 
     # In bảng Top Alive đầy đủ
+    sort_title = f" (Sắp xếp theo {sort_by.upper()})" if sort_by and sort_by != "none" else ""
     alive_table = Table(
-        title=f"=== TOP ALIVE PROXIES (Sắp xếp theo {sort_by.upper()}) ===",
+        title=f"=== TOP ALIVE PROXIES{sort_title} ===",
         expand=True,
     )
     alive_table.add_column("#", justify="right", style="dim", width=4)
     alive_table.add_column("Proxy", style="cyan")
+    alive_table.add_column("Public IP", style="yellow", width=18)
     alive_table.add_column("Latency", justify="right", style="magenta")
     alive_table.add_column("Speed", justify="right", style="bold green")
-    alive_table.add_column("Out IP", style="yellow")
 
     for idx, r in enumerate(sorted_alive[:50], 1):
         lat = f"{r.latency_ms:.0f} ms" if r.latency_ms is not None else "NA"
-        spd = f"{r.download_mb_s:.2f} MB/s" if r.download_mb_s is not None else "NA"
+        spd = format_speed(r.download_mb_s, r.download_error)
         proxy_display = mask_proxy(r.proxy, mask_password)
-        alive_table.add_row(str(idx), proxy_display, lat, spd, r.out_ip or "NA")
+        alive_table.add_row(str(idx), proxy_display, r.out_ip or "NA", lat, spd)
 
     console.print(alive_table)
 
@@ -420,13 +450,15 @@ def print_results(results: List[ProxyResult], sort_by: str = "latency", mask_pas
     if dead:
         dead_table = Table(title="=== DEAD PROXIES (Mẫu 30 cái) ===", expand=True)
         dead_table.add_column("Proxy", style="dim")
+        dead_table.add_column("Public IP", style="yellow", width=18)
         dead_table.add_column("Lỗi / Status", style="red")
 
         for r in dead[:30]:
             err = r.error or f"status={r.status_code}"
             proxy_display = mask_proxy(r.proxy, mask_password)
             err_display = mask_proxy(err, mask_password)
-            dead_table.add_row(proxy_display, err_display)
+            ip_display = r.out_ip or "[dim]-[/dim]"
+            dead_table.add_row(proxy_display, ip_display, err_display)
 
         console.print()
         console.print(dead_table)
@@ -452,9 +484,9 @@ if __name__ == "__main__":
     )
     ap.add_argument(
         "--sort",
-        choices=["latency", "speed"],
-        default="speed",
-        help="Sắp xếp kết quả theo speed hoặc latency (mặc định speed)",
+        choices=["none", "speed", "latency"],
+        default="none",
+        help="Sắp xếp kết quả theo speed, latency hoặc none (mặc định: none - không sắp xếp)",
     )
     ap.add_argument(
         "--check-url", default=DEFAULT_CHECK_URL, help="URL kiểm tra alive và IP"
