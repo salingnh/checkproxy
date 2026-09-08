@@ -35,34 +35,37 @@ socks4|194.67.210.15|1080
 
 ---
 
-## 2. Hướng Dẫn Chạy Bằng Docker Run (Dùng Image từ GitHub Packages / GHCR)
+## 2. Cách 1: Sử Dụng Docker Image Có Sẵn (Khuyên Dùng)
 
-Image đã được tự động build và xuất bản lên GitHub Container Registry (GHCR) thông qua workflow [.github/workflows/docker-publish.yml](.github/workflows/docker-publish.yml).
+Bạn không cần clone mã nguồn hay build image, chỉ cần máy có Docker là có thể chạy ngay bằng image công khai:
 
-### 2.1. Cú pháp cơ bản truyền file input từ bên ngoài
+```bash
+ghcr.io/salingnh/checkproxy:latest
+```
 
-Bạn có thể truyền file proxy từ bất kỳ vị trí nào trên máy chủ (host) vào container thông qua tùy chọn `-v` (volume mount):
+### 2.1. Cú pháp cơ bản (Truyền file proxy từ bên ngoài)
+
+Sử dụng tùy chọn `-v` (volume mount) để gắn file proxy từ máy chủ (host) vào container:
 
 ```bash
 docker run --rm -it \
   -v "/duong/dan/den/file_proxy.txt:/data/input_proxy:ro" \
-  ghcr.io/<owner>/checkproxy:latest \
+  ghcr.io/salingnh/checkproxy:latest \
   -i /data/input_proxy
 ```
 
-> **Lưu ý quan trọng:**
-> - Tham số `-it`: Bắt buộc để phân bổ pseudo-TTY, giúp giao diện bảng Live Terminal hiển thị động và mượt mà.
-> - Tham số `:ro`: Gắn quyền Read-Only cho file proxy giúp đảm bảo container không thay đổi nội dung file gốc.
-> - Thay thế `<owner>` bằng tên người dùng hoặc tổ chức GitHub của bạn (ví dụ: `ghcr.io/sang-nguyen/checkproxy:latest`).
+> **Lưu ý:**
+> - `-it`: Bắt buộc để giao diện Live Terminal hiển thị bảng cập nhật động.
+> - `:ro`: Quyền Read-Only đảm bảo file gốc trên máy của bạn không bị thay đổi.
 
 ### 2.2. Ví dụ chạy với file proxy tại thư mục hiện tại
 
-Nếu bạn đang đứng ở thư mục chứa file proxy (ví dụ `proxies.txt`):
+Nếu bạn đang đứng ở thư mục có chứa file proxy (ví dụ `proxies.txt`):
 
 ```bash
 docker run --rm -it \
   -v "$(pwd)/proxies.txt:/data/input_proxy:ro" \
-  ghcr.io/<owner>/checkproxy:latest \
+  ghcr.io/salingnh/checkproxy:latest \
   -i /data/input_proxy \
   -c 20 \
   --sort speed
@@ -75,7 +78,7 @@ Mặc định công cụ tải ~2MB (`2000000` bytes) để đo tốc độ. N�
 ```bash
 docker run --rm -it \
   -v "$(pwd)/proxies.txt:/data/input_proxy:ro" \
-  ghcr.io/<owner>/checkproxy:latest \
+  ghcr.io/salingnh/checkproxy:latest \
   -i /data/input_proxy \
   -c 15 \
   --speed-bytes 5000000 \
@@ -84,62 +87,57 @@ docker run --rm -it \
 
 ---
 
-## 3. Hướng Dẫn Chạy Bằng Docker Compose (Chạy Tại Source Code)
+## 3. Cách 2: Tự Build Từ Mã Nguồn (Source Code)
 
-Nếu bạn đã clone mã nguồn về máy:
+Nếu bạn đã tải mã nguồn về máy:
 
-1. Tạo hoặc đặt file danh sách proxy thành `input_proxy` ở thư mục gốc của repo.
-2. Khởi chạy bằng Docker Compose:
-   ```bash
-   docker compose run --rm checkproxy
-   ```
-3. Truyền thêm tham số tùy ý:
-   ```bash
-   docker compose run --rm checkproxy -i input_proxy -c 25 --sort latency
-   ```
+### 3.1. Chạy nhanh bằng Docker Compose
+Đặt file danh sách proxy thành `input_proxy` ở thư mục gốc của repo, sau đó chạy:
+
+```bash
+docker compose run --rm checkproxy
+```
+
+Hoặc truyền các tham số tùy ý:
+```bash
+docker compose run --rm checkproxy -i input_proxy -c 25 --sort latency
+```
+
+### 3.2. Tự build Docker Image thủ công
+```bash
+# 1. Build image từ Dockerfile
+docker build -t checkproxy:latest .
+
+# 2. Chạy container truyền file input ngoài
+docker run --rm -it \
+  -v "$(pwd)/proxies.txt:/data/input_proxy:ro" \
+  checkproxy:latest \
+  -i /data/input_proxy \
+  -c 10 \
+  --sort speed
+```
 
 ---
 
-## 4. Tài Liệu Chi Tiết Các Tham Số (Arguments)
+## 4. Bảng Tham Số Chi Tiết (CLI Arguments)
 
-Tất cả các tham số có thể được truyền trực tiếp phía sau tên image khi chạy `docker run`:
+Các tham số có thể truyền trực tiếp vào lệnh chạy để tùy biến hành vi:
 
 | Tham số | Viết tắt | Mặc định | Bắt buộc | Chi tiết |
 | :--- | :---: | :---: | :---: | :--- |
 | `--input` | `-i` | *Không có* | **Có** | Đường dẫn đến file danh sách proxy bên trong container (ví dụ: `/data/input_proxy`). |
-| `--concurrency` | `-c` | `10` | Không | Số lượng worker kiểm tra đồng thời (concurrency limit). Tăng lên 20-50 nếu danh sách proxy dài. |
+| `--concurrency` | `-c` | `10` | Không | Số lượng worker kiểm tra đồng thời. Tăng lên 20-50 nếu danh sách proxy nhiều. |
 | `--sort` | | `speed` | Không | Tiêu chí sắp xếp bảng kết quả: <br>• `speed`: Ưu tiên tốc độ tải về cao nhất xuống thấp. <br>• `latency`: Ưu tiên ping/độ trễ thấp nhất lên trước. |
-| `--speed-bytes` | | `2000000` | Không | Dung lượng byte tối đa tải về để đo tốc độ (mặc định 2MB). Giảm xuống (ví dụ `500000`) để check nhanh hơn hoặc tăng lên để đo chính xác hơn. |
+| `--speed-bytes` | | `2000000` | Không | Dung lượng byte tải về để đo tốc độ (mặc định 2MB). Giảm xuống để check nhanh hơn hoặc tăng lên để đo kỹ hơn. |
 | `--connect-timeout`| | `3.0` | Không | Timeout kết nối TCP ban đầu tới proxy (tính bằng giây). |
 | `--timeout` | | `15.0` | Không | Tổng thời gian timeout tối đa cho toàn bộ chu trình kiểm tra một proxy (tính bằng giây). |
-| `--check-url` | | `https://ifconfig.io/ip` | Không | URL dùng để kiểm tra proxy có phản hồi và lấy Outbound IP của proxy. |
-| `--speed-url` | | `https://speed.cloudflare.com/__down?bytes={bytes}` | Không | URL dùng để tải dữ liệu đo tốc độ. Tự động thay thế placeholder `{bytes}` bằng giá trị của `--speed-bytes`. |
-| `--mask-password` | | `True` | Không | Ẩn mật khẩu của proxy khi hiển thị (`user:***@host:port`). Có thể truyền `true`/`false`. |
-| `--no-mask-password`| | | Không | Cờ hiển thị rõ ràng thông tin mật khẩu đầy đủ, không che. |
+| `--check-url` | | `https://ifconfig.io/ip` | Không | URL dùng để kiểm tra proxy còn sống (alive) và lấy Outbound IP của proxy. |
+| `--speed-url` | | `https://speed.cloudflare.com/__down?bytes={bytes}` | Không | URL dùng để tải dữ liệu đo tốc độ. Tự động thay thế placeholder `{bytes}`. |
+| `--mask-password` | | `True` | Không | Ẩn mật khẩu proxy khi hiển thị (`user:***@host:port`). Có thể truyền `true`/`false`. |
+| `--no-mask-password`| | | Không | Hiển thị mật khẩu proxy đầy đủ trên màn hình, không che. |
 
 ---
 
-## 5. Tự Động Build Docker Image Với GitHub Actions
+## 5. Giấy Phép (License)
 
-Repository đã được thiết lập sẵn quy trình CI/CD trong [.github/workflows/docker-publish.yml](.github/workflows/docker-publish.yml):
-
-- **Tự động kích hoạt khi**:
-  - Có commit mới được đẩy (push) lên nhánh `main`.
-  - Có git tag mới theo định dạng phiên bản `v*.*.*` (ví dụ: `v1.0.0`).
-  - Kích hoạt thủ công từ tab **Actions** trên GitHub giao diện web (`workflow_dispatch`).
-- **Quy trình thực hiện**:
-  1. Kiểm tra mã nguồn.
-  2. Cài đặt Docker Buildx với bộ nhớ đệm GitHub Actions Cache giúp tăng tốc độ build.
-  3. Đăng nhập tự động vào GitHub Container Registry thông qua `GITHUB_TOKEN`.
-  4. Đóng gói và gắn tag (`latest`, `sha-...`, `vX.Y.Z`).
-  5. Đẩy image lên kho lưu trữ: `ghcr.io/<owner>/checkproxy:latest`.
-
-### Tự build Image thủ công trên máy (Local Build)
-Nếu muốn tự build image trên máy mà không kéo từ GHCR:
-```bash
-docker build -t checkproxy:latest .
-```
-Sau đó chạy:
-```bash
-docker run --rm -it -v "$(pwd)/proxies.txt:/data/input_proxy:ro" checkproxy:latest -i /data/input_proxy
-```
+Dự án được phân phối dưới giấy phép mã nguồn mở [LICENSE](LICENSE) (MIT License).

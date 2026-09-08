@@ -39,6 +39,11 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          labels: |
+            org.opencontainers.image.title=checkproxy
+            org.opencontainers.image.description=High performance asynchronous proxy checker with live terminal UI
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.licenses=MIT
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
