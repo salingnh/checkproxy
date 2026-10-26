@@ -1,0 +1,15 @@
+.git
+.venv
+venv
+.cache
+**/__pycache__
+**/input_proxy*
+**/output_proxy*
+**/*proxies*.txt
+**/alive*.txt
+**/dead*.txt
+**/alive*.csv
+**/dead*.csv
+**/.env
+**/.env.*
+**/*.log

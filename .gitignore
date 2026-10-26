@@ -5,6 +5,8 @@ output_proxy*
 *proxies*.txt
 alive*.txt
 dead*.txt
+alive*.csv
+dead*.csv
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

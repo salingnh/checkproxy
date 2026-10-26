@@ -1,12 +1,13 @@
 import argparse
 import asyncio
+import csv
 import os
 import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 
@@ -30,7 +31,7 @@ except ImportError:
 #     -v "$PWD:/work" \
 #     -w /work \
 #     python:3.12-slim \
-#     bash -lc "pip install --no-cache-dir --default-timeout=100 -q 'httpx[socks]' rich && python /work/check_proxy.py -i /work/input_proxy -c 5 --sort speed --speed-bytes 2000000"
+#     bash -lc "pip install --no-cache-dir --default-timeout=100 -q 'httpx[socks]' rich && python /work/check_proxy.py -i /work/input_proxy -c 5 --full --sort speed --speed-bytes 2000000"
 
 
 DEFAULT_CHECK_URL = "https://ifconfig.io/ip"
@@ -63,14 +64,16 @@ class ActiveTaskInfo:
 
 
 class CheckerState:
-    def __init__(self, total: int, sort_by: str = "none", mask_password: bool = True):
+    def __init__(self, total: int, sort_by: str = "none", mask_password: bool = True, full: bool = False):
         self.total = total
         self.sort_by = sort_by
         self.mask_password = mask_password
+        self.full = full
         self.active_tasks: Dict[int, ActiveTaskInfo] = {}
         self.completed: List[ProxyResult] = []
         self.alive_count: int = 0
         self.dead_count: int = 0
+        self.speed_completed: int = 0
 
 
 def mask_proxy(p: str, mask: bool = True) -> str:
@@ -103,8 +106,8 @@ def normalize_proxy(p: str) -> str:
         user = p_split[3]
         password = p_split[4]
         if user or password:
-            user = quote(user)
-            password = quote(password)
+            user = quote(user, safe="")
+            password = quote(password, safe="")
             p = f"{schema}://{user}:{password}@{host}:{port}"
         else:
             p = f"{schema}://{host}:{port}"
@@ -189,29 +192,32 @@ async def measure_download_speed(
 
     err_msg = None
     try:
-        async with client.stream("GET", url, timeout=timeout_s) as r:
-            r.raise_for_status()
-            async for chunk in r.aiter_bytes():
-                if not chunk:
-                    continue
-                remaining = max_bytes - downloaded
-                if remaining <= 0:
-                    break
-                if len(chunk) > remaining:
-                    chunk = chunk[:remaining]
-                downloaded += len(chunk)
+        async with asyncio.timeout(timeout_s):
+            async with client.stream("GET", url, timeout=timeout_s) as r:
+                r.raise_for_status()
+                async for chunk in r.aiter_bytes():
+                    if not chunk:
+                        continue
+                    remaining = max_bytes - downloaded
+                    if remaining <= 0:
+                        break
+                    if len(chunk) > remaining:
+                        chunk = chunk[:remaining]
+                    downloaded += len(chunk)
 
-                dt = time.perf_counter() - t0
-                if dt > 0 and active_info:
-                    active_info.downloaded = downloaded
-                    active_info.speed_mb_s = (downloaded / (1024 * 1024)) / dt
+                    dt = time.perf_counter() - t0
+                    if dt > 0 and active_info:
+                        active_info.downloaded = downloaded
+                        active_info.speed_mb_s = (downloaded / (1024 * 1024)) / dt
 
-                if downloaded >= max_bytes:
-                    break
+                    if downloaded >= max_bytes:
+                        break
     except httpx.ReadTimeout:
         err_msg = "ReadTimeout"
     except httpx.ConnectTimeout:
         err_msg = "ConnectTimeout"
+    except TimeoutError:
+        err_msg = "Timeout"
     except httpx.HTTPStatusError as e:
         err_msg = f"HTTP {e.response.status_code}"
     except Exception as e:
@@ -227,10 +233,8 @@ async def measure_download_speed(
 async def test_one_proxy(
     proxy_url: str,
     check_url: str = DEFAULT_CHECK_URL,
-    speed_url: str = DEFAULT_SPEED_URL,
     connect_timeout_s: float = 3.0,
     total_timeout_s: float = 15.0,
-    speed_max_bytes: int = 500_000,
     active_info: Optional[ActiveTaskInfo] = None,
     latency_timeout_s: float = 5.0,
 ) -> ProxyResult:
@@ -263,22 +267,6 @@ async def test_one_proxy(
 
             if 200 <= status < 300:
                 res.alive = True
-                url_for_speed = speed_url
-                if "{bytes}" in speed_url:
-                    try:
-                        url_for_speed = speed_url.format(bytes=speed_max_bytes)
-                    except (KeyError, ValueError):
-                        url_for_speed = speed_url
-
-                sp, dl_err = await measure_download_speed(
-                    client,
-                    url_for_speed,
-                    total_timeout_s,
-                    speed_max_bytes,
-                    active_info=active_info,
-                )
-                res.download_mb_s = sp
-                res.download_error = dl_err
             else:
                 res.alive = False
                 res.error = f"HTTP {status}"
@@ -297,6 +285,32 @@ async def test_one_proxy(
         res.error = f"{type(e).__name__}: {e}"
 
     return res
+
+
+async def test_proxy_speed(
+    result: ProxyResult,
+    speed_url: str = DEFAULT_SPEED_URL,
+    total_timeout_s: float = 15.0,
+    speed_max_bytes: int = 1_000_000,
+    active_info: Optional[ActiveTaskInfo] = None,
+):
+    try:
+        if "{bytes}" in speed_url:
+            try:
+                speed_url = speed_url.format(bytes=speed_max_bytes)
+            except (KeyError, ValueError):
+                pass
+        async with httpx.AsyncClient(
+            proxy=result.proxy,
+            timeout=total_timeout_s,
+            follow_redirects=True,
+            headers={"User-Agent": "proxy-checker/1.0"},
+        ) as client:
+            result.download_mb_s, result.download_error = await measure_download_speed(
+                client, speed_url, total_timeout_s, speed_max_bytes, active_info=active_info,
+            )
+    except Exception as e:
+        result.download_error = f"{type(e).__name__}: {e}"
 
 
 def load_proxies(path: str) -> List[str]:
@@ -349,27 +363,36 @@ def make_render_group(state: CheckerState) -> Group:
     top_table.add_column("Proxy", style="cyan", no_wrap=True)
     top_table.add_column("Public IP", style="yellow", width=18)
     top_table.add_column("Latency", justify="right", style="magenta", width=12)
-    top_table.add_column("Speed", justify="right", style="bold green", width=16)
+    if state.full:
+        top_table.add_column("Speed", justify="right", style="bold green", width=16)
 
     if latest_alive:
         for idx, r in enumerate(latest_alive[:10], 1):
             lat = f"{r.latency_ms:.0f} ms" if r.latency_ms is not None else "NA"
-            spd = format_speed(r.download_mb_s, r.download_error)
             proxy_display = mask_proxy(r.proxy, state.mask_password)
-            top_table.add_row(str(idx), proxy_display, r.out_ip or "NA", lat, spd)
+            row = [str(idx), proxy_display, r.out_ip or "NA", lat]
+            if state.full:
+                row.append(format_speed(r.download_mb_s, r.download_error))
+            top_table.add_row(*row)
     else:
-        top_table.add_row("-", "[dim]Đang kiểm tra, chưa có proxy ALIVE...[/dim]", "-", "-", "-")
+        row = ["-", "[dim]Đang kiểm tra, chưa có proxy ALIVE...[/dim]", "-", "-"]
+        if state.full:
+            row.append("-")
+        top_table.add_row(*row)
 
     # 2. BẢNG CÁC PROXY ĐANG CHẠY CONCURRENT (Hiển thị % và MB/s)
+    speed_active = sum(info.phase == "Đang tải speed" for info in state.active_tasks.values())
+    stage_counts = f" | Check: {len(state.active_tasks) - speed_active} | Speed: {speed_active}" if state.full else ""
     active_table = Table(
-        title=f"⚡ [bold cyan]TIẾN TRÌNH CHECK ĐỒNG THỜI (Active: {len(state.active_tasks)})[/bold cyan]",
+        title=f"⚡ [bold cyan]TIẾN TRÌNH CHECK ĐỒNG THỜI (Active: {len(state.active_tasks)}{stage_counts})[/bold cyan]",
         expand=True,
     )
     active_table.add_column("Proxy Đang Check", style="blue", no_wrap=True)
     active_table.add_column("Public IP", style="yellow", width=18)
     active_table.add_column("Trạng thái", width=16)
-    active_table.add_column("Tiến độ Download", width=34)
-    active_table.add_column("Tốc độ", justify="right", style="bold green", width=14)
+    if state.full:
+        active_table.add_column("Tiến độ Download", width=34)
+        active_table.add_column("Tốc độ", justify="right", style="bold green", width=14)
 
     active_items = list(state.active_tasks.values())
     if active_items:
@@ -391,9 +414,15 @@ def make_render_group(state: CheckerState) -> Group:
                 ip_display = "[dim]-[/dim]"
 
             proxy_display = mask_proxy(info.proxy, state.mask_password)
-            active_table.add_row(proxy_display, ip_display, status, prog_text, speed_text)
+            row = [proxy_display, ip_display, status]
+            if state.full:
+                row.extend([prog_text, speed_text])
+            active_table.add_row(*row)
     else:
-        active_table.add_row("[dim]Không có worker đang chạy[/dim]", "-", "-", "-", "-")
+        row = ["[dim]Không có worker đang chạy[/dim]", "-", "-"]
+        if state.full:
+            row.extend(["-", "-"])
+        active_table.add_row(*row)
 
     # 3. THANH TRẠNG THÁI TIẾN ĐỘ TỔNG
     bar_overall = format_progress_bar(len(state.completed), state.total, width=20)
@@ -403,12 +432,15 @@ def make_render_group(state: CheckerState) -> Group:
         f"[bold red]Dead: {state.dead_count}[/bold red] | "
         f"[bold yellow]Đang chạy: {len(state.active_tasks)}[/bold yellow]"
     )
+    if state.full:
+        pending_speed = state.alive_count - state.speed_completed - speed_active
+        summary_text += f" | Speed: {state.speed_completed}/{state.alive_count} | Chờ speed: {pending_speed}"
     summary_panel = Panel(summary_text, expand=True)
 
     return Group(top_table, active_table, summary_panel)
 
 
-def print_results(results: List[ProxyResult], sort_by: str = "latency", mask_password: bool = True):
+def print_results(results: List[ProxyResult], sort_by: str = "latency", mask_password: bool = True, full: bool = False):
     """In kết quả tổng kết cuối cùng ra terminal"""
     console = Console()
     alive = [r for r in results if r.alive]
@@ -433,13 +465,16 @@ def print_results(results: List[ProxyResult], sort_by: str = "latency", mask_pas
     alive_table.add_column("Proxy", style="cyan")
     alive_table.add_column("Public IP", style="yellow", width=18)
     alive_table.add_column("Latency", justify="right", style="magenta")
-    alive_table.add_column("Speed", justify="right", style="bold green")
+    if full:
+        alive_table.add_column("Speed", justify="right", style="bold green")
 
     for idx, r in enumerate(sorted_alive, 1):
         lat = f"{r.latency_ms:.0f} ms" if r.latency_ms is not None else "NA"
-        spd = format_speed(r.download_mb_s, r.download_error)
         proxy_display = mask_proxy(r.proxy, mask_password)
-        alive_table.add_row(str(idx), proxy_display, r.out_ip or "NA", lat, spd)
+        row = [str(idx), proxy_display, r.out_ip or "NA", lat]
+        if full:
+            row.append(format_speed(r.download_mb_s, r.download_error))
+        alive_table.add_row(*row)
 
     console.print(alive_table)
 
@@ -464,12 +499,38 @@ def print_results(results: List[ProxyResult], sort_by: str = "latency", mask_pas
 def save_results(results: List[ProxyResult], output_dir: str = "."):
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
-    for filename, alive in (("alive.txt", True), ("dead.txt", False)):
+    fields = ("status", "host", "port", "user", "pass", "proxy", "out_ip", "status_code",
+              "latency_ms", "download_mb_s", "error", "download_error", "public_ip")
+    for filename, alive in (("alive.csv", True), ("dead.csv", False)):
         fd = os.open(directory / filename, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as output:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as output:
             # File chứa thông tin xác thực, chỉ chủ sở hữu được đọc/ghi.
             os.fchmod(output.fileno(), 0o600)
-            output.writelines(f"{r.proxy}\n" for r in results if r.alive == alive)
+            writer = csv.DictWriter(output, fieldnames=fields)
+            writer.writeheader()
+            for result in results:
+                if result.alive != alive:
+                    continue
+                host = port = user = password = ""
+                try:
+                    parsed = urlsplit(result.proxy)
+                    host = parsed.hostname or ""
+                    user = unquote(parsed.username or "")
+                    password = unquote(parsed.password or "")
+                    try:
+                        port = parsed.port
+                    except ValueError:
+                        port = parsed.netloc.rsplit(":", 1)[-1]
+                except ValueError:
+                    pass
+                writer.writerow({
+                    "status": "ALIVE" if result.alive else "DEAD",
+                    "host": host, "port": port, "user": user, "pass": password,
+                    "proxy": result.proxy, "out_ip": result.out_ip, "status_code": result.status_code,
+                    "latency_ms": result.latency_ms, "download_mb_s": result.download_mb_s,
+                    "error": result.error, "download_error": result.download_error,
+                    "public_ip": result.out_ip,
+                })
 
 
 def str2bool(v):
@@ -484,11 +545,16 @@ def str2bool(v):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(
-        description="Proxy checker (http/https/socks4/socks5) - alive + latency + speed với giao diện Live Terminal"
+        description="Proxy checker (http/https/socks5/socks5h) - kiểm tra sống/chết, dùng --full để đo thêm tốc độ"
     )
     ap.add_argument("-i", "--input", required=True, help="Đường dẫn tới file proxy")
     ap.add_argument(
         "-c", "--concurrency", type=int, default=20, help="Số lượng proxy check đồng thời (mặc định 20)"
+    )
+    ap.add_argument("--full", action="store_true", help="Kiểm tra sống/chết và đo tốc độ bằng nhóm luồng riêng")
+    ap.add_argument(
+        "--speed-concurrency", type=int, default=5,
+        help="Số luồng đo tốc độ riêng khi dùng --full (mặc định 5)",
     )
     ap.add_argument(
         "--sort",
@@ -502,26 +568,26 @@ if __name__ == "__main__":
     ap.add_argument(
         "--speed-url",
         default=DEFAULT_SPEED_URL,
-        help="URL kiểm tra download speed (hỗ trợ placeholder {bytes})",
+        help="URL kiểm tra download speed khi dùng --full (hỗ trợ placeholder {bytes})",
     )
     ap.add_argument(
         "--speed-bytes",
         type=int,
         default=1_000_000,
-        help="Số bytes download để đo tốc độ (mặc định 1,000,000 = ~1MB)",
+        help="Số bytes download khi dùng --full (mặc định 1,000,000 = ~1MB)",
     )
     ap.add_argument(
         "--connect-timeout", type=float, default=3.0, help="Timeout kết nối (giây)"
     )
     ap.add_argument(
-        "--timeout", type=float, default=15.0, help="Timeout toàn bộ request (giây)"
+        "--timeout", type=float, default=15.0, help="Timeout thao tác mạng và giới hạn tổng bước đo tốc độ (giây)"
     )
     ap.add_argument(
         "--latency-timeout", type=float, default=5.0,
         help="Giới hạn toàn bộ bước kiểm tra latency (giây, mặc định: 5)",
     )
     ap.add_argument(
-        "--output-dir", default=".", help="Thư mục lưu alive.txt và dead.txt (mặc định: thư mục hiện tại)"
+        "--output-dir", default=".", help="Thư mục lưu alive.csv và dead.csv (mặc định: thư mục hiện tại)"
     )
     ap.add_argument(
         "--mask-password",
@@ -542,48 +608,74 @@ if __name__ == "__main__":
     )
     args = ap.parse_args()
 
+    if args.concurrency <= 0 or args.speed_concurrency <= 0:
+        ap.error("--concurrency và --speed-concurrency phải lớn hơn 0.")
+    if args.sort == "speed" and not args.full:
+        ap.error("--sort speed cần --full để đo tốc độ.")
     if Path(args.input).resolve() in {
-        (Path(args.output_dir) / name).resolve() for name in ("alive.txt", "dead.txt")
+        (Path(args.output_dir) / name).resolve() for name in ("alive.csv", "dead.csv")
     }:
-        ap.error("File đầu vào không được trùng với file kết quả alive.txt hoặc dead.txt.")
+        ap.error("File đầu vào không được trùng với file kết quả alive.csv hoặc dead.csv.")
 
     proxies = load_proxies(args.input)
     if not proxies:
         raise SystemExit("Không tìm thấy proxy nào trong file đầu vào.")
 
     async def main():
-        sem = asyncio.Semaphore(args.concurrency)
         state = CheckerState(
             total=len(proxies),
             sort_by=args.sort,
             mask_password=args.mask_password,
+            full=args.full,
         )
+        check_queue = asyncio.Queue()
+        speed_queue = asyncio.Queue()
+        for index, proxy in enumerate(proxies):
+            check_queue.put_nowait((index, proxy))
 
-        async def runner(index: int, p: str):
-            async with sem:
-                info = ActiveTaskInfo(proxy=p, phase="Đang chờ")
+        async def check_worker():
+            while not check_queue.empty():
+                index, proxy = check_queue.get_nowait()
+                info = ActiveTaskInfo(proxy=proxy, phase="Kiểm tra Ping")
                 state.active_tasks[index] = info
                 try:
                     res = await test_one_proxy(
-                        p,
+                        proxy,
                         check_url=args.check_url,
-                        speed_url=args.speed_url,
                         connect_timeout_s=args.connect_timeout,
                         total_timeout_s=args.timeout,
-                        speed_max_bytes=args.speed_bytes,
                         active_info=info,
                         latency_timeout_s=args.latency_timeout,
                     )
                     state.completed.append(res)
                     if res.alive:
                         state.alive_count += 1
+                        if args.full:
+                            speed_queue.put_nowait((index, res))
                     else:
                         state.dead_count += 1
-                    return res
                 finally:
                     state.active_tasks.pop(index, None)
+                    check_queue.task_done()
 
-        tasks = [asyncio.create_task(runner(index, p)) for index, p in enumerate(proxies)]
+        async def speed_worker():
+            while True:
+                index, res = await speed_queue.get()
+                state.active_tasks[index] = ActiveTaskInfo(
+                    proxy=res.proxy, phase="Đang tải speed", out_ip=res.out_ip, latency_ms=res.latency_ms,
+                )
+                try:
+                    await test_proxy_speed(
+                        res, speed_url=args.speed_url, total_timeout_s=args.timeout,
+                        speed_max_bytes=args.speed_bytes, active_info=state.active_tasks[index],
+                    )
+                    state.speed_completed += 1
+                finally:
+                    state.active_tasks.pop(index, None)
+                    speed_queue.task_done()
+
+        check_tasks = [asyncio.create_task(check_worker()) for _ in range(min(args.concurrency, len(proxies)))]
+        speed_tasks = [asyncio.create_task(speed_worker()) for _ in range(args.speed_concurrency)] if args.full else []
 
         async def refresh_display(live: Live):
             while True:
@@ -599,22 +691,22 @@ if __name__ == "__main__":
         ) as live:
             updater = asyncio.create_task(refresh_display(live))
             try:
-                await asyncio.gather(*tasks, return_exceptions=True)
+                await asyncio.gather(*check_tasks)
+                if args.full:
+                    await speed_queue.join()
             finally:
-                updater.cancel()
-                try:
-                    await updater
-                except asyncio.CancelledError:
-                    pass
+                for task in [updater, *check_tasks, *speed_tasks]:
+                    task.cancel()
+                await asyncio.gather(updater, *check_tasks, *speed_tasks, return_exceptions=True)
             # Cập nhật lần cuối trước khi tắt Live
             live.update(make_render_group(state))
 
         # In kết quả tổng kết lưu lại lịch sử terminal
-        print_results(state.completed, sort_by=args.sort, mask_password=args.mask_password)
+        print_results(state.completed, sort_by=args.sort, mask_password=args.mask_password, full=args.full)
         save_results(state.completed, args.output_dir)
         Console().print(
-            f"Đã lưu danh sách đầy đủ vào {Path(args.output_dir) / 'alive.txt'} và "
-            f"{Path(args.output_dir) / 'dead.txt'} (URL đầy đủ, gồm mật khẩu nếu có).",
+            f"Đã lưu danh sách đầy đủ vào {Path(args.output_dir) / 'alive.csv'} và "
+            f"{Path(args.output_dir) / 'dead.csv'} (gồm tài khoản và mật khẩu nếu có).",
             markup=False,
         )
 
