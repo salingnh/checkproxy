@@ -1,8 +1,10 @@
 import argparse
 import asyncio
+import os
 import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -65,7 +67,7 @@ class CheckerState:
         self.total = total
         self.sort_by = sort_by
         self.mask_password = mask_password
-        self.active_tasks: Dict[str, ActiveTaskInfo] = {}
+        self.active_tasks: Dict[int, ActiveTaskInfo] = {}
         self.completed: List[ProxyResult] = []
         self.alive_count: int = 0
         self.dead_count: int = 0
@@ -147,7 +149,8 @@ async def measure_latency(
     """
     Returns: (status_code, latency_ms, out_ip)
     """
-    r = await client.get(url, timeout=timeout_s)
+    async with asyncio.timeout(timeout_s):
+        r = await client.get(url)
     latency_ms = r.elapsed.total_seconds() * 1000.0
 
     out_ip = None
@@ -225,10 +228,11 @@ async def test_one_proxy(
     proxy_url: str,
     check_url: str = DEFAULT_CHECK_URL,
     speed_url: str = DEFAULT_SPEED_URL,
-    connect_timeout_s: float = 8.0,
+    connect_timeout_s: float = 3.0,
     total_timeout_s: float = 15.0,
     speed_max_bytes: int = 500_000,
     active_info: Optional[ActiveTaskInfo] = None,
+    latency_timeout_s: float = 5.0,
 ) -> ProxyResult:
     res = ProxyResult(proxy=proxy_url, alive=False)
 
@@ -247,7 +251,7 @@ async def test_one_proxy(
             headers={"User-Agent": "proxy-checker/1.0"},
         ) as client:
             status, latency_ms, out_ip = await measure_latency(
-                client, check_url, total_timeout_s
+                client, check_url, min(latency_timeout_s, total_timeout_s)
             )
             res.status_code = status
             res.latency_ms = latency_ms
@@ -284,6 +288,8 @@ async def test_one_proxy(
         res.error = "ConnectTimeout (Check IP)"
     except httpx.ReadTimeout:
         res.error = "ReadTimeout (Check IP)"
+    except TimeoutError:
+        res.error = "Timeout (Check IP)"
     except httpx.HTTPStatusError as e:
         res.error = f"HTTP {e.response.status_code}"
         res.status_code = getattr(e.response, "status_code", None)
@@ -294,8 +300,6 @@ async def test_one_proxy(
 
 
 def load_proxies(path: str) -> List[str]:
-    import os
-
     if not os.path.exists(path):
         raise FileNotFoundError(f"Proxy file not found: {path}")
 
@@ -334,13 +338,11 @@ def sort_alive_proxies(proxies: List[ProxyResult], sort_by: str = "none") -> Lis
 
 def make_render_group(state: CheckerState) -> Group:
     """Tạo layout hiển thị Terminal Live cập nhật liên tục"""
-    # 1. BẢNG KẾT QUẢ ĐÃ XONG (Sắp xếp theo sort_by)
-    alive_completed = [r for r in state.completed if r.alive]
-    sorted_alive = sort_alive_proxies(alive_completed, sort_by=state.sort_by)
+    # 1. BẢNG KẾT QUẢ ĐÃ XONG (Mới nhất trước)
+    latest_alive = [r for r in reversed(state.completed) if r.alive]
 
-    sort_title = f" (Sắp xếp theo {state.sort_by.upper()})" if state.sort_by and state.sort_by != "none" else ""
     top_table = Table(
-        title=f"🏆 [bold green]TOP PROXIES HOẠT ĐỘNG{sort_title}[/bold green]",
+        title="🏆 [bold green]TOP PROXIES HOẠT ĐỘNG (MỚI NHẤT TRƯỚC)[/bold green]",
         expand=True,
     )
     top_table.add_column("#", justify="right", style="dim", width=4)
@@ -349,8 +351,8 @@ def make_render_group(state: CheckerState) -> Group:
     top_table.add_column("Latency", justify="right", style="magenta", width=12)
     top_table.add_column("Speed", justify="right", style="bold green", width=16)
 
-    if sorted_alive:
-        for idx, r in enumerate(sorted_alive[:10], 1):
+    if latest_alive:
+        for idx, r in enumerate(latest_alive[:10], 1):
             lat = f"{r.latency_ms:.0f} ms" if r.latency_ms is not None else "NA"
             spd = format_speed(r.download_mb_s, r.download_error)
             proxy_display = mask_proxy(r.proxy, state.mask_password)
@@ -371,7 +373,7 @@ def make_render_group(state: CheckerState) -> Group:
 
     active_items = list(state.active_tasks.values())
     if active_items:
-        for info in active_items[:8]:
+        for info in active_items:
             ip_display = info.out_ip or "[dim]Đang lấy...[/dim]"
             if info.phase == "Đang tải speed":
                 status = "[bold cyan]Downloading[/bold cyan]"
@@ -390,11 +392,6 @@ def make_render_group(state: CheckerState) -> Group:
 
             proxy_display = mask_proxy(info.proxy, state.mask_password)
             active_table.add_row(proxy_display, ip_display, status, prog_text, speed_text)
-
-        if len(active_items) > 8:
-            active_table.add_row(
-                f"[dim]+ {len(active_items) - 8} proxy khác...[/dim]", "", "", "", ""
-            )
     else:
         active_table.add_row("[dim]Không có worker đang chạy[/dim]", "-", "-", "-", "-")
 
@@ -426,10 +423,10 @@ def print_results(results: List[ProxyResult], sort_by: str = "latency", mask_pas
     )
     console.print()
 
-    # In bảng Top Alive đầy đủ
+    # In đầy đủ bảng Alive
     sort_title = f" (Sắp xếp theo {sort_by.upper()})" if sort_by and sort_by != "none" else ""
     alive_table = Table(
-        title=f"=== TOP ALIVE PROXIES{sort_title} ===",
+        title=f"=== ALIVE PROXIES{sort_title} ===",
         expand=True,
     )
     alive_table.add_column("#", justify="right", style="dim", width=4)
@@ -438,7 +435,7 @@ def print_results(results: List[ProxyResult], sort_by: str = "latency", mask_pas
     alive_table.add_column("Latency", justify="right", style="magenta")
     alive_table.add_column("Speed", justify="right", style="bold green")
 
-    for idx, r in enumerate(sorted_alive[:50], 1):
+    for idx, r in enumerate(sorted_alive, 1):
         lat = f"{r.latency_ms:.0f} ms" if r.latency_ms is not None else "NA"
         spd = format_speed(r.download_mb_s, r.download_error)
         proxy_display = mask_proxy(r.proxy, mask_password)
@@ -446,14 +443,14 @@ def print_results(results: List[ProxyResult], sort_by: str = "latency", mask_pas
 
     console.print(alive_table)
 
-    # In danh sách Dead mẫu
+    # In đầy đủ danh sách Dead
     if dead:
-        dead_table = Table(title="=== DEAD PROXIES (Mẫu 30 cái) ===", expand=True)
+        dead_table = Table(title="=== DEAD PROXIES ===", expand=True)
         dead_table.add_column("Proxy", style="dim")
         dead_table.add_column("Public IP", style="yellow", width=18)
         dead_table.add_column("Lỗi / Status", style="red")
 
-        for r in dead[:30]:
+        for r in dead:
             err = r.error or f"status={r.status_code}"
             proxy_display = mask_proxy(r.proxy, mask_password)
             err_display = mask_proxy(err, mask_password)
@@ -462,6 +459,17 @@ def print_results(results: List[ProxyResult], sort_by: str = "latency", mask_pas
 
         console.print()
         console.print(dead_table)
+
+
+def save_results(results: List[ProxyResult], output_dir: str = "."):
+    directory = Path(output_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    for filename, alive in (("alive.txt", True), ("dead.txt", False)):
+        fd = os.open(directory / filename, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            # File chứa thông tin xác thực, chỉ chủ sở hữu được đọc/ghi.
+            os.fchmod(output.fileno(), 0o600)
+            output.writelines(f"{r.proxy}\n" for r in results if r.alive == alive)
 
 
 def str2bool(v):
@@ -480,7 +488,7 @@ if __name__ == "__main__":
     )
     ap.add_argument("-i", "--input", required=True, help="Đường dẫn tới file proxy")
     ap.add_argument(
-        "-c", "--concurrency", type=int, default=10, help="Số lượng proxy check đồng thời (mặc định 10)"
+        "-c", "--concurrency", type=int, default=20, help="Số lượng proxy check đồng thời (mặc định 20)"
     )
     ap.add_argument(
         "--sort",
@@ -499,14 +507,21 @@ if __name__ == "__main__":
     ap.add_argument(
         "--speed-bytes",
         type=int,
-        default=2_000_000,
-        help="Số bytes download để đo tốc độ (mặc định 2,000,000 = ~2MB)",
+        default=1_000_000,
+        help="Số bytes download để đo tốc độ (mặc định 1,000,000 = ~1MB)",
     )
     ap.add_argument(
         "--connect-timeout", type=float, default=3.0, help="Timeout kết nối (giây)"
     )
     ap.add_argument(
         "--timeout", type=float, default=15.0, help="Timeout toàn bộ request (giây)"
+    )
+    ap.add_argument(
+        "--latency-timeout", type=float, default=5.0,
+        help="Giới hạn toàn bộ bước kiểm tra latency (giây, mặc định: 5)",
+    )
+    ap.add_argument(
+        "--output-dir", default=".", help="Thư mục lưu alive.txt và dead.txt (mặc định: thư mục hiện tại)"
     )
     ap.add_argument(
         "--mask-password",
@@ -527,6 +542,11 @@ if __name__ == "__main__":
     )
     args = ap.parse_args()
 
+    if Path(args.input).resolve() in {
+        (Path(args.output_dir) / name).resolve() for name in ("alive.txt", "dead.txt")
+    }:
+        ap.error("File đầu vào không được trùng với file kết quả alive.txt hoặc dead.txt.")
+
     proxies = load_proxies(args.input)
     if not proxies:
         raise SystemExit("Không tìm thấy proxy nào trong file đầu vào.")
@@ -539,11 +559,11 @@ if __name__ == "__main__":
             mask_password=args.mask_password,
         )
 
-        async def runner(p: str):
-            info = ActiveTaskInfo(proxy=p, phase="Đang chờ")
-            state.active_tasks[p] = info
-            try:
-                async with sem:
+        async def runner(index: int, p: str):
+            async with sem:
+                info = ActiveTaskInfo(proxy=p, phase="Đang chờ")
+                state.active_tasks[index] = info
+                try:
                     res = await test_one_proxy(
                         p,
                         check_url=args.check_url,
@@ -552,6 +572,7 @@ if __name__ == "__main__":
                         total_timeout_s=args.timeout,
                         speed_max_bytes=args.speed_bytes,
                         active_info=info,
+                        latency_timeout_s=args.latency_timeout,
                     )
                     state.completed.append(res)
                     if res.alive:
@@ -559,10 +580,10 @@ if __name__ == "__main__":
                     else:
                         state.dead_count += 1
                     return res
-            finally:
-                state.active_tasks.pop(p, None)
+                finally:
+                    state.active_tasks.pop(index, None)
 
-        tasks = [asyncio.create_task(runner(p)) for p in proxies]
+        tasks = [asyncio.create_task(runner(index, p)) for index, p in enumerate(proxies)]
 
         async def refresh_display(live: Live):
             while True:
@@ -574,6 +595,7 @@ if __name__ == "__main__":
             make_render_group(state),
             refresh_per_second=10,
             transient=True,
+            vertical_overflow="visible",
         ) as live:
             updater = asyncio.create_task(refresh_display(live))
             try:
@@ -589,6 +611,12 @@ if __name__ == "__main__":
 
         # In kết quả tổng kết lưu lại lịch sử terminal
         print_results(state.completed, sort_by=args.sort, mask_password=args.mask_password)
+        save_results(state.completed, args.output_dir)
+        Console().print(
+            f"Đã lưu danh sách đầy đủ vào {Path(args.output_dir) / 'alive.txt'} và "
+            f"{Path(args.output_dir) / 'dead.txt'} (URL đầy đủ, gồm mật khẩu nếu có).",
+            markup=False,
+        )
 
     try:
         asyncio.run(main())

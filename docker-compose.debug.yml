@@ -1,0 +1,4 @@
+services:
+  checkproxy:
+    entrypoint: ["sleep", "infinity"]
+    command: []

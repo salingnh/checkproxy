@@ -3,4 +3,4 @@ services:
     build: .
     volumes:
       - .:/app
-    command: ["-i", "input_proxy", "-c", "10"]
+    command: ["-i", "input_proxy"]

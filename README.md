@@ -1,208 +1,200 @@
-# CheckProxy - Công Cụ Kiểm Tra Proxy Đa Năng
+# CheckProxy
 
-Công cụ kiểm tra danh sách proxy (HTTP, HTTPS, SOCKS4, SOCKS5) bất đồng bộ với hiệu năng cao, giao diện dòng lệnh (CLI) trực quan cập nhật theo thời gian thực (Live Terminal) và đo lường chi tiết:
+Công cụ kiểm tra proxy bất đồng bộ, hiển thị tiến trình trên terminal, đo latency qua HTTP(S), lấy IP đầu ra và đo tốc độ tải. Toàn bộ môi trường chạy, phát triển và kiểm thử sử dụng Docker; không cần cài Python hoặc package trên host.
 
-- **Trạng thái**: Alive / Dead.
-- **Độ trễ (Latency)**: Tính bằng mili-giây (ms).
-- **Tốc độ tải về (Download Speed)**: Đo đạc tốc độ thực tế (MB/s) qua luồng stream.
-- **Outbound IP**: Nhận diện IP thực tế mà proxy sử dụng khi ra Internet.
-- **Bảo mật**: Mặc định tự động che mật khẩu proxy (`user:***@host:port`) khi hiển thị trên màn hình.
+Tài liệu này mô tả mã nguồn hiện tại trong [check_proxy.py](check_proxy.py). CLI và Docker Compose mặc định chạy **20 luồng**, tải tối đa **1.000.000 byte/proxy** để đo tốc độ và giới hạn bước latency ở **5 giây**.
 
----
+## 1. Định dạng file đầu vào
 
-## 1. Định Dạng File Proxy Đầu Vào
-
-File danh sách proxy sử dụng định dạng phân tách bởi dấu gạch đứng `|`:
+File UTF-8, mỗi dòng dùng dấu `|` để phân tách:
 
 ```text
-schema|host|port|username|password
 schema|host|port
+schema|host|port|username|password
 ```
 
-- **schema**: `http`, `https`, `socks4`, hoặc `socks5`.
-- **username/password**: Để trống hoặc bỏ qua nếu proxy không yêu cầu xác thực.
-- Hỗ trợ comment bằng ký tự `#` ở đầu dòng và tự động bỏ qua các dòng trống.
-
-**Ví dụ:**
+Ví dụ file `input_proxy`:
 
 ```text
-# Proxy có tài khoản mật khẩu
-http|103.152.118.23|8080|myuser|mypassword
-socks5|45.76.182.90|1080|proxyuser|secret123
+# Proxy không yêu cầu xác thực
+http|192.0.2.10|8080
+https|192.0.2.11|8443
 
-# Proxy không có xác thực (không có user/pass)
-http|116.202.12.34|3128
-socks4|194.67.210.15|1080
+# Proxy có tài khoản
+socks5|192.0.2.12|1080|myuser|mypassword
+socks5h|proxy.example.com|1080|myuser|mypassword
 ```
 
----
+Các địa chỉ trên chỉ minh họa định dạng; thay bằng proxy của bạn trước khi chạy.
 
-## 2. Cách 1: Sử Dụng Docker Image Có Sẵn (Khuyên Dùng)
+- Các scheme được HTTPX hiện tại chấp nhận: `http`, `https`, `socks5`, `socks5h`. **SOCKS4 chưa được hỗ trợ**, dù phần mô tả trong `--help` còn liệt kê `socks4`.
+- Bỏ qua dòng trống, comment bắt đầu bằng `#` và dòng có ít hơn ba trường.
+- Để trống cả username/password hoặc dùng định dạng ba trường nếu không có xác thực. Dùng đúng ba hoặc năm trường.
+- Proxy trùng dòng vẫn được kiểm tra riêng.
+- Nếu không đọc được file hoặc không còn proxy nào sau khi lọc, chương trình dừng trước khi kiểm tra.
 
-Bạn không cần clone mã nguồn hay build image, chỉ cần máy có Docker là có thể chạy ngay bằng image công khai:
+## 2. Chạy từ mã nguồn bằng Docker Compose
+
+Yêu cầu Docker và Docker Compose. Chạy các lệnh sau tại thư mục repo; đặt file proxy tên `input_proxy` tại đây.
 
 ```bash
-ghcr.io/salingnh/checkproxy:latest
+docker compose build
+docker compose run --rm --user "$(id -u):$(id -g)" checkproxy
 ```
 
-### 2.1. Cú pháp cơ bản (Truyền file proxy từ bên ngoài)
+[docker-compose.yml](docker-compose.yml) mount thư mục repo vào `/app` và truyền `-i input_proxy`. Hai file `alive.txt` và `dead.txt` được lưu ngay trong repo trên host khi hoàn tất. `--user` giúp file xuất thuộc tài khoản đang chạy lệnh.
 
-Sử dụng tùy chọn `-v` (volume mount) để gắn file proxy từ máy chủ (host) vào container:
+Ví dụ tùy chỉnh số luồng, latency và thư mục kết quả:
 
 ```bash
-docker run --rm -it \
-  -v "/duong/dan/den/file_proxy.txt:/data/input_proxy:ro" \
-  ghcr.io/salingnh/checkproxy:latest \
-  -i /data/input_proxy
+docker compose run --rm --user "$(id -u):$(id -g)" checkproxy \
+  -i input_proxy -c 20 --latency-timeout 3 --output-dir /app/results
 ```
 
-> **Lưu ý:**
->
-> - `-it`: Bắt buộc để giao diện Live Terminal hiển thị bảng cập nhật động.
-> - `:ro`: Quyền Read-Only đảm bảo file gốc trên máy của bạn không bị thay đổi.
+Kết quả nằm tại `results/alive.txt` và `results/dead.txt` trên host. Khi truyền tham số sau tên service, cần truyền lại `-i` vì chúng thay thế `command` của Compose.
 
-### 2.2. Ví dụ chạy với file proxy tại thư mục hiện tại
-
-Nếu bạn đang đứng ở thư mục có chứa file proxy (ví dụ `proxies.txt`):
+Ví dụ tải mẫu lớn hơn và sắp xếp bảng tổng kết theo tốc độ:
 
 ```bash
-docker run --rm -it \
-  -v "$(pwd)/proxies.txt:/data/input_proxy:ro" \
-  ghcr.io/salingnh/checkproxy:latest \
-  -i /data/input_proxy \
-  -c 20
+docker compose run --rm --user "$(id -u):$(id -g)" checkproxy \
+  -i input_proxy --speed-bytes 5000000 --sort speed
 ```
 
-*(Tùy chọn: Thêm `--sort speed` hoặc `--sort latency` nếu muốn sắp xếp kết quả).*
+## 3. Chạy bằng Docker image
 
-### 2.3. Ví dụ đo tốc độ sâu (tải file mẫu lớn hơn)
+### 3.1. Build image từ mã nguồn hiện tại
 
-Mặc định công cụ tải ~2MB (`2000000` bytes) để đo tốc độ. Nếu bạn muốn kiểm tra kỹ hơn với lượng dữ liệu tải ~5MB:
+[Dockerfile](Dockerfile) sử dụng Python 3.12 và cài dependency từ [requirements.txt](requirements.txt).
+
+`Dockerfile` hiện dùng `COPY . .`: khi build hoặc publish, cần bảo đảm build context không chứa file proxy, kết quả có mật khẩu hoặc secret. `.gitignore` không loại chúng khỏi Docker build context.
 
 ```bash
-docker run --rm -it \
-  -v "$(pwd)/proxies.txt:/data/input_proxy:ro" \
-  ghcr.io/salingnh/checkproxy:latest \
-  -i /data/input_proxy \
-  -c 15 \
-  --speed-bytes 5000000 \
-  --sort speed
+docker build -t checkproxy:local .
+docker run --rm -it --user "$(id -u):$(id -g)" \
+  -v "$(pwd)/input_proxy:/data/input_proxy:ro" \
+  -v "$(pwd):/output" \
+  checkproxy:local \
+  -i /data/input_proxy -c 20 --output-dir /output
 ```
 
----
+Mount input bằng đường dẫn tuyệt đối tới **file có sẵn**. Thư mục `/output` được mount ra host để giữ kết quả sau khi container bị xóa bởi `--rm`. `-it` cấp terminal tương tác để xem giao diện cập nhật trực tiếp; có thể bỏ khi chạy không tương tác.
 
-## 3. Cách 2: Tự Build Từ Mã Nguồn (Source Code)
+CLI mặc định `-c 20`. Riêng `CMD` trong Dockerfile vẫn là `-i input_proxy -c 10`, nên image chạy **không truyền tham số** dùng 10 luồng. Truyền `-i ...` thay thế `CMD` và dùng mặc định CLI, hoặc đặt `-c` rõ ràng như ví dụ trên.
 
-Nếu bạn đã tải mã nguồn về máy:
+### 3.2. Image từ registry
 
-### 3.1. Chạy nhanh bằng Docker Compose
+Có thể thay `checkproxy:local` trong lệnh trên bằng `ghcr.io/salingnh/checkproxy:latest`. Image phải được build/publish từ revision có các tính năng được mô tả trong tài liệu; nếu registry chưa cập nhật, hãy build từ mã nguồn.
 
-Đặt file danh sách proxy thành `input_proxy` ở thư mục gốc của repo, sau đó chạy:
+[Workflow Docker](.github/workflows/docker-publish.yml) build khi có PR vào `main`/`master`; publish khi push vào hai nhánh này, push tag `v*.*.*` hoặc chạy thủ công. Địa chỉ image theo `ghcr.io/<owner>/<repo>`, tag `latest` áp dụng cho `main`/`master`. PR chỉ build, không publish.
 
-```bash
-docker compose run --rm checkproxy
-```
+## 4. Cách kiểm tra và kết quả
 
-Hoặc truyền các tham số tùy ý:
+### 4.1. Trạng thái, latency và tốc độ
 
-```bash
-docker compose run --rm checkproxy -i input_proxy -c 25 --sort latency
-```
+Mỗi proxy được xử lý lần lượt:
 
-### 3.2. Tự build Docker Image thủ công
+1. Gửi GET qua proxy tới `--check-url`, theo chuyển hướng và trích IP đầu ra từ phản hồi.
+2. Nếu status cuối cùng là `2xx`, đánh dấu ALIVE và tải dữ liệu từ `--speed-url` để đo tốc độ.
+3. Hoàn tất cả bước đo tốc độ mới đưa kết quả vào danh sách đã xong và giải phóng luồng.
 
-```bash
-# 1. Build image từ Dockerfile
-docker build -t checkproxy:latest .
+Status ngoài `2xx`, lỗi proxy, lỗi kết nối hoặc timeout ở bước kiểm tra IP được ghi là DEAD. Lỗi tải dữ liệu đo tốc độ **vẫn giữ trạng thái ALIVE** nếu kiểm tra IP đã thành công.
 
-# 2. Chạy container truyền file input ngoài
-docker run --rm -it \
-  -v "$(pwd)/proxies.txt:/data/input_proxy:ro" \
-  checkproxy:latest \
-  -i /data/input_proxy \
-  -c 10
-```
+Các timeout tính bằng giây:
 
----
+- `--latency-timeout` mặc định **5**: giới hạn tổng bước kiểm tra IP, gồm kết nối, chuyển hướng và đọc phản hồi. Giới hạn thực tế là giá trị nhỏ hơn giữa `--latency-timeout` và `--timeout`.
+- `--connect-timeout` mặc định **3**: timeout kết nối của bước kiểm tra IP.
+- `--timeout` mặc định **15**: timeout từng thao tác mạng. Bước đo tốc độ dùng giá trị này cho cả kết nối và đọc dữ liệu, không có giới hạn tổng thời gian riêng. Luồng tải vẫn nhận dữ liệu đều có thể chạy lâu hơn 15 giây.
 
-## 4. Giao Diện & Output Mẫu (Terminal Live & Summary)
+Latency hiển thị bằng ms, được lấy từ thời gian phản hồi do HTTPX ghi nhận. Dung lượng tải mặc định là **1.000.000 byte**; tốc độ có nhãn `MB/s` trên giao diện và được tính theo byte / 1024² / giây.
 
-Nhờ thư viện `rich`, công cụ cung cấp giao diện cập nhật thời gian thực (Live Terminal) trong khi đang quét và bảng tổng kết trực quan sau khi hoàn tất.
+### 4.2. Terminal trực tiếp và bảng tổng kết
 
-### 4.1. Giao diện trực tiếp khi đang quét (Live Terminal)
+Trong khi chạy, terminal có ba khu vực:
 
-Bao gồm 3 khu vực: Bảng top proxy đã kiểm tra thành công, bảng tiến trình tải về của các proxy đang chạy đồng thời (với cột Public IP, thanh % tiến độ và tốc độ MB/s tức thời), cùng thanh trạng thái tổng:
+- **TOP PROXIES HOẠT ĐỘNG (MỚI NHẤT TRƯỚC)**: tối đa 10 proxy ALIVE vừa hoàn tất, mới nhất ở trên cùng.
+- **TIẾN TRÌNH CHECK ĐỒNG THỜI**: một dòng cho mỗi luồng thực sự đang chạy, với proxy, Public IP, trạng thái, dung lượng đã tải và tốc độ. `-c 20` hiển thị tối đa 20 dòng, giảm khi còn ít proxy. Proxy chờ lượt không tính vào `Active` hoặc `Đang chạy`; các luồng dùng cùng URL vẫn có dòng riêng.
+- **Thanh tổng tiến độ**: số proxy đã hoàn tất/tổng số, ALIVE, DEAD và số luồng đang chạy.
+
+Giao diện không cắt bớt dòng khi vượt chiều cao terminal; cần cuộn hoặc tăng chiều cao cửa sổ để xem hết.
+
+Sau khi hoàn tất, terminal in tổng số và **toàn bộ** kết quả ALIVE/DEAD, không giới hạn số proxy. Bảng DEAD chỉ xuất hiện khi có proxy chết. Bảng ALIVE có các cột `#`, `Proxy`, `Public IP`, `Latency`, `Speed`; bảng DEAD có `Proxy`, `Public IP`, `Lỗi / Status`.
+
+`--sort` chỉ áp dụng cho bảng ALIVE trong tổng kết:
+
+- `none` (mặc định): theo thứ tự hoàn tất.
+- `speed`: tốc độ cao trước.
+- `latency`: độ trễ thấp trước.
+
+Cột Speed có thể hiện `ReadTimeout`, `ConnectTimeout`, `HTTP 503` hoặc tên lỗi khác. Nếu đã tải được một phần trước khi lỗi, tốc độ có dấu `*`; `NA` xuất hiện khi không có cả tốc độ lẫn lỗi tải.
+
+### 4.3. File kết quả
+
+Sau khi quét xong, chương trình tạo thư mục `--output-dir` nếu cần, rồi tạo hoặc ghi đè:
+
+- `alive.txt`: đầy đủ proxy ALIVE.
+- `dead.txt`: đầy đủ proxy DEAD.
+
+Mỗi dòng là URL đầy đủ, ví dụ:
 
 ```text
-┌────────────────────────────────────────── 🏆 TOP PROXIES HOẠT ĐỘNG ──────────────────────────────────────────┐
-│ #    Proxy                                       Public IP          Latency            Speed                 │
-│ 1    http://user:***@103.152.118.23:8080         103.152.118.23     115 ms             4.25 MB/s             │
-│ 2    socks5://proxyuser:***@45.76.182.90:1080    45.76.182.90       180 ms             2.40 MB/s             │
-│ 3    http://116.202.12.34:3128                   116.202.12.34      320 ms             1.15 MB/s             │
-│ 4    socks4://194.67.210.15:1080                 194.67.210.15      450 ms             0.85 MB/s             │
-└─────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-
-┌──────────────────────────── ⚡ TIẾN TRÌNH CHECK ĐỒNG THỜI (Active: 4) ──────────────────────────────┐
-│ Proxy Đang Check                     Public IP        Trạng thái    Tiến độ Download        Tốc độ  │
-│ http://user:***@14.225.20.10:8080    14.225.20.10     Downloading   ━━━━━━━  52.4% (1.05MB) 2.15 MB/s│
-│ socks5://188.166.220.1:1080          188.166.220.1    Downloading   ━━━━━━━ 100.0% (2.00MB) 3.10 MB/s│
-│ http://45.118.144.2:3128             Đang lấy...      Ping...       đang đo latency              -  │
-│ socks4://103.10.12.5:1080            -                Đang chờ      --                           -  │
-└─────────────────────────────────────────────────────────────────────────────────────────────────────┘
-
-╭─────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ Tiến độ: ━━━━━━━━━━━━ 65.0% 13/20 | Alive: 9 | Dead: 4 | Đang chạy: 4                               │
-╰─────────────────────────────────────────────────────────────────────────────────────────────────────╯
+http://192.0.2.10:8080
+socks5://myuser:mypassword@192.0.2.12:1080
 ```
 
-### 4.2. Bảng kết quả tổng kết cuối cùng
+File giữ thứ tự hoàn tất và các dòng trùng; `--sort` không sắp xếp file. Nhóm không có kết quả vẫn được ghi thành file rỗng.
 
-Khi hoàn tất, bảng tổng kết sẽ được in lưu lại trên terminal với đầy đủ số liệu đo đạc chi tiết (cột **Public IP** đặt ngay sau cột **Proxy** đồng bộ ở cả bảng ALIVE và bảng DEAD):
+Terminal che mật khẩu mặc định. File xuất **chứa thông tin xác thực đầy đủ**, không chịu ảnh hưởng của `--mask-password`, và có quyền `0600` (chỉ chủ sở hữu đọc/ghi). Với Docker, dùng `--user` như ví dụ để tài khoản trên host sở hữu file.
 
-```text
-Tổng kết: ALIVE: 14 | DEAD: 6 | TOTAL: 20
+Đầu vào dùng dấu `|`, còn đầu ra dùng URL. Muốn dùng file kết quả làm đầu vào cho công cụ này, cần chuyển lại định dạng có dấu `|`.
 
-=== TOP ALIVE PROXIES ===
-┏━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┓
-┃ # ┃ Proxy                                   ┃        Public IP ┃    Latency ┃               Speed ┃
-┡━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━┩
-│ 1 │ http://user:***@103.152.118.23:8080     │   103.152.118.23 │     115 ms │           4.25 MB/s │
-│ 2 │ socks5://proxyuser:***@45.76.182.90:1080│     45.76.182.90 │     180 ms │           2.40 MB/s │
-│ 3 │ http://116.202.12.34:3128               │    116.202.12.34 │     320 ms │           1.15 MB/s │
-│ 4 │ socks4://194.67.210.15:1080             │    194.67.210.15 │     450 ms │ Lỗi tải(ReadTimeout)│
-└───┴─────────────────────────────────────────┴──────────────────┴────────────┴─────────────────────┘
+Chương trình từ chối nếu đường dẫn input trùng `alive.txt` hoặc `dead.txt` trong thư mục xuất. File chỉ được lưu khi hoàn tất toàn bộ lượt quét; dừng bằng `Ctrl+C` không xuất kết quả đang chạy.
 
-=== DEAD PROXIES (Mẫu 30 cái) ===
-┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ Proxy                                       ┃        Public IP ┃ Lỗi / Status                   ┃
-┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-│ http://103.21.244.2:80                      │                - │ ConnectTimeout (Check IP)      │
-│ socks5://192.241.160.1:1080                 │                - │ ProxyError: Connection refused │
-│ http://user:***@45.32.11.22:8080            │     45.32.11.22  │ HTTP 407                       │
-└───┴─────────────────────────────────────────┴──────────────────┴────────────────────────────────┘
+## 5. Tham số CLI
+
+Các mặc định dưới đây thuộc CLI; xem lưu ý `CMD` của Dockerfile ở mục 3.1. Số luồng, số byte và các timeout nên dùng giá trị dương.
+
+| Tham số | Mặc định | Ý nghĩa |
+| --- | --- | --- |
+| `-i`, `--input` | Bắt buộc | Đường dẫn file proxy bên trong container. |
+| `-c`, `--concurrency` | `20` | Số proxy được kiểm tra đồng thời. |
+| `--sort` | `none` | Sắp xếp bảng ALIVE tổng kết: `none`, `speed`, `latency`. |
+| `--speed-bytes` | `1000000` | Số byte tối đa dùng để đo tốc độ tải. |
+| `--connect-timeout` | `3.0` | Timeout kết nối ở bước kiểm tra IP, tính bằng giây. |
+| `--latency-timeout` | `5.0` | Giới hạn tổng bước kiểm tra IP, tính bằng giây. |
+| `--timeout` | `15.0` | Timeout từng thao tác mạng; đồng thời giới hạn trên của bước kiểm tra IP. |
+| `--check-url` | `https://ifconfig.io/ip` | URL kiểm tra trạng thái và lấy IP đầu ra. |
+| `--speed-url` | `https://speed.cloudflare.com/__down?bytes={bytes}` | URL tải mẫu, thay `{bytes}` bằng `--speed-bytes`. |
+| `--output-dir` | `.` | Thư mục lưu `alive.txt` và `dead.txt`; mặc định `/app` khi chạy bằng image. |
+| `--mask-password`, `--mark-password` | `true` | Che mật khẩu trên terminal. Có thể truyền `true`/`false` hoặc chỉ truyền cờ để bật. |
+| `--no-mask-password`, `--no-mark-password` | Không bật | Hiện mật khẩu đầy đủ trên terminal. |
+| `-h`, `--help` | — | In trợ giúp CLI. |
+
+Xem trợ giúp từ mã nguồn đang mount:
+
+```bash
+docker compose run --rm checkproxy --help
 ```
 
----
+## 6. Phát triển và kiểm thử trong Docker
 
-## 5. Bảng Tham Số Chi Tiết (CLI Arguments)
+[docker-compose.debug.yml](docker-compose.debug.yml) dùng chung image và source mount với Compose chính, thay entrypoint bằng `sleep infinity` để chạy lệnh kiểm thử trong container.
 
-Các tham số có thể truyền trực tiếp vào lệnh chạy để tùy biến hành vi:
+```bash
+docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.debug.yml exec -T checkproxy python -m unittest -v
+docker compose -f docker-compose.yml -f docker-compose.debug.yml logs -f --tail=100 checkproxy
+```
 
-| Tham số               | Viết tắt |                      Mặc định                      |  Bắt buộc  | Chi tiết                                                                                                                                                                 |
-| :--------------------- | :--------: | :---------------------------------------------------: | :-----------: | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `--input`            |   `-i`   |                    *Không có*                    | **Có** | Đường dẫn đến file danh sách proxy bên trong container (ví dụ:`/data/input_proxy`).                                                                           |
-| `--concurrency`      |   `-c`   |                        `10`                        |    Không    | Số lượng worker kiểm tra đồng thời. Tăng lên 20-50 nếu danh sách proxy nhiều.                                                                                 |
-| `--sort`             |            |                       `none`                        |    Không    | Tiêu chí sắp xếp bảng kết quả (mặc định không sắp xếp): <br>• `none`: Giữ nguyên thứ tự kết quả trả về.<br>• `speed`: Ưu tiên tốc độ tải cao xuống thấp.<br>• `latency`: Ưu tiên ping thấp lên trước. |
-| `--speed-bytes`      |            |                      `2000000`                      |    Không    | Dung lượng byte tải về để đo tốc độ (mặc định 2MB). Giảm xuống để check nhanh hơn hoặc tăng lên để đo kỹ hơn.                                   |
-| `--connect-timeout`  |            |                        `3.0`                        |    Không    | Timeout kết nối TCP ban đầu tới proxy (tính bằng giây).                                                                                                           |
-| `--timeout`          |            |                       `15.0`                       |    Không    | Tổng thời gian timeout tối đa cho toàn bộ chu trình kiểm tra một proxy (tính bằng giây).                                                                      |
-| `--check-url`        |            |              `https://ifconfig.io/ip`              |    Không    | URL dùng để kiểm tra proxy còn sống (alive) và lấy Outbound IP của proxy.                                                                                        |
-| `--speed-url`        |            | `https://speed.cloudflare.com/__down?bytes={bytes}` |    Không    | URL dùng để tải dữ liệu đo tốc độ. Tự động thay thế placeholder`{bytes}`.                                                                                 |
-| `--mask-password`    |            |                       `True`                       |    Không    | Ẩn mật khẩu proxy khi hiển thị (`user:***@host:port`). Có thể truyền `true`/`false`.                                                                        |
-| `--no-mask-password` |            |                                                      |    Không    | Hiển thị mật khẩu proxy đầy đủ trên màn hình, không che.                                                                                                      |
+`logs -f` theo dõi log đến khi nhấn `Ctrl+C`. Container debug chạy `sleep infinity`, nên output kiểm thử nằm ở lệnh `exec` và service có thể không có log. Không cần cài thêm package trên host.
 
----
+[test_check_proxy.py](test_check_proxy.py) dùng HTTP server/proxy giả lập trong container để kiểm tra timeout, xuất file, che mật khẩu, thứ tự top mới nhất và số dòng luồng chạy (kể cả proxy trùng và terminal thấp). Các bài kiểm thử không cần proxy thật hoặc Internet; bước build image có thể cần mạng để tải base image/dependency.
 
-## 6. Giấy Phép (License)
+Dọn container debug sau khi dùng:
 
-Dự án được phân phối dưới giấy phép mã nguồn mở [LICENSE](LICENSE) (MIT License).
+```bash
+docker compose -f docker-compose.yml -f docker-compose.debug.yml down
+```
+
+## 7. Giấy phép
+
+[MIT License](LICENSE).
